@@ -76,6 +76,8 @@ force = False
 drop_old_data = False
 comprows = None
 query_group = None
+schema_compression = None
+schema_compression_stat = None
     
 def execute_query(str):
     conn = get_pg_conn()
@@ -186,7 +188,7 @@ def get_pg_conn():
                 comment(set_query_group)
 
             conn.query(set_query_group)
-        
+
         if query_slot_count != 1:
             set_slot_count = 'set wlm_query_slot_count = %s' % (query_slot_count)
             
@@ -194,7 +196,7 @@ def get_pg_conn():
                 comment(set_slot_count)
                 
             conn.query(set_slot_count)
-
+            
         # set a long statement timeout
         set_timeout = "set statement_timeout = '1200000'"
         if debug:
@@ -519,11 +521,69 @@ def usage(with_message):
     write('           --drop-old-data  - Drop the old version of the data table, rather than renaming')
     write('           --comprows       - Set the number of rows to use for Compression Encoding Analysis')
     write('           --query_group    - Set the query_group for all queries')
+    write('           --schema-compression - Show tables that needs compression in specified schema')
+    write('           --schema-compression-stat - Show current table compression percentage of a schema')
     sys.exit(INVALID_ARGS)
 
+def show_uncompressed_tables():
+    statement = (
+        "select * from pg_table_def where schemaname='%s' and encoding='none';"
+    ) % schema_compression
+
+    results = execute_query(statement)
+    comment('Uncompressed Tables and Columns:')
+    tables = []
+    for result in results:
+        comment('%s.%s type: %s' % (result[1], result[2], result[3]))
+        if result[1] not in tables:
+            tables.append(result[1])
+    comment('Tables: %s' % str(tables))
+
+def show_compressed_percentage_tables():
+    statement = (
+        "select * from pg_table_def where schemaname='%s';"
+    ) % schema_compression_stat
+
+    results = execute_query(statement)
+    comment('Tables and Columns Compression Percentage:')
+    comment('Tables:')
+    tables = {}
+    compressed = 0
+    compressed_tables = []
+    for result in results:
+        if result[4] != 'none':
+            compressed += 1
+            if result[1] not in tables.keys():
+                tables[result[1]] = dict(
+                    compressed=1,
+                    total=1
+                )
+                if result[1] not in compressed_tables:
+                    compressed_tables.append(result[1])
+            else:
+                tables[result[1]]['total'] += 1
+                tables[result[1]]['compressed'] += 1
+                if result[1] not in compressed_tables:
+                    compressed_tables.append(result[1])
+        else:
+            if result[1] not in tables.keys():
+                tables[result[1]] = dict(
+                    compressed=0,
+                    total=1
+                )
+            else:
+                tables[result[1]]['total'] += 1
+
+    for key in tables.keys():
+        comment('%s: %0.1f%% compressed' %  (key, ((float(tables[key]['compressed'])/tables[key]['total']) * 100)))
+
+    comment('Tables: %0.1f%% compressed (%d of %d tables)' % (((float(len(compressed_tables))/len(tables))*100), len(compressed_tables), len(tables)))
+    comment('Columns: %0.1f%% compressed(%d of %d columns)' % (((float(compressed)/len(results))*100), compressed, len(results)))
+
+    
 
 def main(argv):
-    supported_args = """db= db-user= db-host= db-port= target-schema= analyze-schema= analyze-table= threads= debug= output-file= do-execute= slot-count= ignore-errors= force= drop-old-data= comprows= query_group="""
+    supported_args = """db= db-user= db-host= db-port= target-schema= analyze-schema= analyze-table= threads= debug= output-file= do-execute= slot-count= ignore-errors= force= drop-old-data= comprows= query_group= schema-compression= schema-compression-stat= """
     
     # extract the command line arguments
     try:
@@ -552,6 +612,9 @@ def main(argv):
     global drop_old_data
     global comprows
     global query_group
+    global schema_compression
+    global schema_compression_stat
+    global anaylze_tables
     
     output_file = None
 
@@ -624,6 +687,10 @@ def main(argv):
         elif arg == "--query_group":
             if value != '' and value != None:
                 query_group = value
+        elif arg == "--schema-compression":
+            schema_compression = value
+        elif arg == "--schema-compression-stat":
+            schema_compression_stat = value
         else:
             assert False, "Unsupported Argument " + arg
             usage()
@@ -639,7 +706,7 @@ def main(argv):
         usage("Missing Parameter 'db-port'")
     if output_file == None:
         usage("Missing Parameter 'output-file'")
-    
+
     if target_schema == None:
         target_schema = analyze_schema
         
@@ -763,11 +830,17 @@ order by 2
         if return_code != OK:
             write("Error in worker thread: return code %d. Exiting." % (return_code,))
             sys.exit(return_code)
+
+    if schema_compression != None:
+        show_uncompressed_tables()
+
+    if schema_compression_stat != None:
+        show_compressed_percentage_tables()
     
     if (do_execute):
         if not commit():
             sys.exit(ERROR)
-    
+
     comment('Processing Complete')
     cleanup()    
     sys.exit(OK)
